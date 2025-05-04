@@ -13,21 +13,6 @@ def get_axis(rotation_matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     )
 
 
-def distance_from_point_to_line(point, line_start, line_end):
-    # Calculate the distance from a point to a line defined by two points
-    line_vec = line_end - line_start
-    point_vec = point - line_start
-    line_len = np.linalg.norm(line_vec)
-    if line_len == 0:
-        return np.linalg.norm(point_vec)  # Line is a point
-
-    line_unit_vec = line_vec / line_len
-    projection_length = np.dot(point_vec, line_unit_vec)
-    projection_point = line_start + projection_length * line_unit_vec
-
-    return np.linalg.norm(point - projection_point)
-
-
 def project_to_image(p, img):
     return np.array([int(p[0] * img.shape[1]), int(p[1] * img.shape[0])])
 
@@ -120,8 +105,12 @@ def get_ratios(
     fifths = get_fifths_landmarks(landmarks)
     x_axis, y_axis = get_axis(rotation_matrix)
 
-    thids_total = abs(np.dot(np.array(thirds[-1]) - np.array(thirds[0]), y_axis))
-    fifths_total = abs(np.dot(np.array(fifths[-1]) - np.array(fifths[0]), x_axis))
+    thids_total = abs(
+        np.dot(np.array(thirds[-1]) - np.array(thirds[0]), y_axis)
+    )
+    fifths_total = abs(
+        np.dot(np.array(fifths[-1]) - np.array(fifths[0]), x_axis)
+    )
 
     # Project distances onto y-axis for thirds
     thirds_ratios = []
@@ -138,35 +127,151 @@ def get_ratios(
     return thirds_ratios, fifths_ratios
 
 
-def is_between_parallel_lines(P1, P2, v, Q):
-    # Normalize perpendicular vector to v
-    n = np.array([-v[1], v[0]])
-    n = n / np.linalg.norm(n)
-
-    # Signed distances
-    d1 = np.dot(Q - P1, n)
-    d2 = np.dot(Q - P2, n)
-
-    return d1 * d2 <= 0  # True if between or on either line
-
-
 def adjust_fifths(
     landmarks: list[np.ndarray],
-    fifths: list[np.ndarray],
     fifths_ratios: list[np.ndarray],
     y_axis: np.ndarray,
 ) -> list[np.ndarray]:
     # change middle section (nose) to match average ratio
-    middle_landmarks = [
-        landmark
-        for landmark in landmarks
-        if is_between_parallel_lines(fifths[2], fifths[3], y_axis, landmark)
-    ]
 
-    adjustment_ratio = 20 / fifths_ratios[2]
+    adjustment_ratio = 1 - (20 / fifths_ratios[2])
 
     adjusted_landmarks = [
-        landmark + (np.dot(fifths[2] - landmark, y_axis) * y_axis) * adjustment_ratio
-        for landmark in middle_landmarks
+        (
+            (
+                landmark
+                + (np.dot(landmarks[1] - landmark, y_axis) * y_axis)
+                * adjustment_ratio
+            ).astype(int)
+            if i in NOSE_LANDMARKS
+            else landmark
+        )
+        for i, landmark in enumerate(landmarks)
     ]
     return adjusted_landmarks
+
+
+def draw_landmarks(
+    img: np.ndarray,
+    landmarks: list[np.ndarray],
+    color=(255, 0, 0),
+    size=1,
+    draw_text: bool = False,
+    filter_index: list[int] | None = None,
+) -> np.ndarray:
+    for i, landmark in enumerate(landmarks):
+        if filter_index is not None and i not in filter_index:
+            continue
+        cv2.circle(img, landmark, size, color, -1)
+        if draw_text:
+            cv2.putText(
+                img,
+                str(i),
+                landmark,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.3,
+                color,
+                1,
+            )
+
+
+NOSE_LANDMARKS = [
+    8,  #
+    193,
+    168,
+    417,  #
+    245,
+    122,
+    6,
+    55,
+    285,
+    351,
+    465,  #
+    188,
+    412,  #
+    126,
+    217,
+    174,
+    196,
+    197,
+    419,
+    399,
+    437,
+    355,  #
+    209,
+    198,
+    236,
+    363,
+    20,
+    3,
+    195,
+    248,
+    456,
+    420,
+    60,
+    429,  #
+    102,
+    49,
+    131,
+    134,
+    51,
+    5,
+    281,
+    360,
+    279,  # might be more at the right down end
+    48,
+    115,
+    220,
+    45,
+    4,
+    275,
+    440,
+    344,
+    278,  #
+    64,
+    219,
+    218,
+    79,
+    237,
+    239,
+    166,
+    235,
+    59,
+    98,
+    240,
+    75,
+    99,
+    97,  #
+    44,
+    1,
+    274,
+    238,
+    241,
+    125,
+    19,
+    354,
+    461,
+    458,
+    242,
+    141,
+    94,
+    370,
+    462,
+    250,
+    2,  #
+    457,
+    459,
+    290,
+    328,
+    326,
+    309,
+    305,
+    438,
+    392,
+    289,
+    305,
+    439,
+    455,
+    294,
+    331,
+]

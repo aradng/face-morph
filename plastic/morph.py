@@ -1,21 +1,11 @@
-from matplotlib import pyplot as plt
+from subprocess import DEVNULL, PIPE, Popen
 import numpy as np
 import cv2
+from PIL import Image
+from pathlib import Path
+from tqdm import tqdm
 
-
-def get_boundary_points(shape):
-    h, w = shape[:2]
-    boundary_pts = [
-        (1, 1),
-        (w - 1, 1),
-        (1, h - 1),
-        (w - 1, h - 1),
-        ((w - 1) // 2, 1),
-        (1, (h - 1) // 2),
-        ((w - 1) // 2, h - 1),
-        ((w - 1) // 2, (h - 1) // 2),
-    ]
-    return np.array(boundary_pts)
+from scipy.spatial import Delaunay
 
 
 def crop_to_face(im, landmarks):
@@ -40,29 +30,149 @@ def crop_to_face(im, landmarks):
     return cropped_face
 
 
-def warp_box(img, src_points: np.ndarray, dst_points, debug: bool = False):
-    mask = np.zeros_like(img)
-    cv2.fillPoly(mask, [dst_points.astype(np.int32)], (255, 255, 255))
-    transform_matrix = cv2.getAffineTransform(
-        src_points[:3].astype(np.float32), dst_points[:3]
+def warp_im(im, src_landmarks, dst_landmarks, dst_triangulation):
+    # im_out = np.zeros_like(im)
+    im_out = im.copy()
+
+    for i in range(len(dst_triangulation)):
+        src_tri = src_landmarks[dst_triangulation[i]]
+        dst_tri = dst_landmarks[dst_triangulation[i]]
+        morph_triangle(im, im_out, src_tri, dst_tri)
+
+    return im_out
+
+
+def draw_triangulation(img, landmarks, triangulation):
+    import matplotlib.pyplot as plt
+
+    plt.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    plt.triplot(
+        landmarks[:, 0],
+        landmarks[:, 1],
+        triangulation,
+        color="blue",
+        linewidth=1,
     )
-    transformed = cv2.warpAffine(img, transform_matrix, (img.shape[1], img.shape[0]))
-    mask = mask.astype(bool)
+    plt.axis("off")
+    plt.show()
+
+
+def affine_transform(src, src_tri, dst_tri, size):
+    M = cv2.getAffineTransform(np.float32(src_tri), np.float32(dst_tri))
+    # BORDER_REFLECT_101 is good for hiding seems
+    dst = cv2.warpAffine(src, M, size, borderMode=cv2.BORDER_REFLECT_101)
+    return dst
+
+
+def morph_triangle(im, im_out, src_tri, dst_tri):
+    # For efficiency, we crop out a rectangular region containing the triangles
+    # to warp only that small part of the image.
+
+    # Get bounding boxes around triangles
+    sr = cv2.boundingRect(np.float32([src_tri]))
+    dr = cv2.boundingRect(np.float32([dst_tri]))
+
+    # Get new triangle coordinates reflecting their location in bounding box
+    cropped_src_tri = [
+        (src_tri[i][0] - sr[0], src_tri[i][1] - sr[1]) for i in range(3)
+    ]
+    cropped_dst_tri = [
+        (dst_tri[i][0] - dr[0], dst_tri[i][1] - dr[1]) for i in range(3)
+    ]
+
+    # Create mask for destination triangle
+    mask = np.zeros((dr[3], dr[2], 3), dtype=np.float32)
+    cv2.fillConvexPoly(mask, np.int32(cropped_dst_tri), (1.0, 1.0, 1.0), 16, 0)
+
+    # Crop input image to corresponding bounding box
+    cropped_im = im[sr[1] : sr[1] + sr[3], sr[0] : sr[0] + sr[2]]
+
+    size = (dr[2], dr[3])
+    warpImage1 = affine_transform(
+        cropped_im, cropped_src_tri, cropped_dst_tri, size
+    )
+
+    # Copy triangular region of the cropped patch to the output image
+    im_out[dr[1] : dr[1] + dr[3], dr[0] : dr[0] + dr[2]] = (
+        im_out[dr[1] : dr[1] + dr[3], dr[0] : dr[0] + dr[2]] * (1 - mask)
+        + warpImage1 * mask
+    )
+
+
+def morph_seq(
+    total_frames, img, src_landmarks, dst_landmarks, triangulation, stream
+):
+
+    img = np.float32(img)
+
+    for j in tqdm(range(total_frames)):
+        alpha = j / (total_frames - 1)
+        weighted_landmarks = (
+            1.0 - alpha
+        ) * src_landmarks + alpha * dst_landmarks
+
+        warped_img = warp_im(
+            img, src_landmarks, weighted_landmarks, triangulation
+        )
+
+        res = Image.fromarray(np.uint8(warped_img))
+        if stream is not None:
+            res.save(stream.stdin, "JPEG")
+
+    return res
+
+
+def morph_pair(
+    frames: int,
+    src_landmarks: np.ndarray,
+    dst_landmarks: np.ndarray,
+    img: np.ndarray,
+    debug: bool = False,
+    output_name: str = "output",
+    fps: int = 30,
+    gif: bool = False,
+):
+    """
+    For a pair of images, produce a morph sequence with the given duration
+    and fps to be written to the provided output stream.
+    """
+    h = max(img.shape[:2])
+    w = min(img.shape[:2])
+
+    p = None
+    output_name = Path(str(output_name).split(".")[0])
+    # path.mkdir(parents=True, exist_ok=True)
+    # output_name = str((path / path.name).absolute())
+    if gif:
+        command = [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "image2pipe",
+            "-r",
+            str(fps),
+            "-s",
+            f"{h}x{w}",
+            "-i",
+            "-",
+            "-vf",
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            f"{output_name}.gif",
+        ]
+
+        p = Popen(command, stdin=PIPE, stdout=DEVNULL, stderr=DEVNULL)
+
+    average_landmarks = (src_landmarks + dst_landmarks) / 2
+    average_landmarks = dst_landmarks
+
+    triangulation = Delaunay(average_landmarks).simplices
     if debug:
-        _, ax = plt.subplots(1, 2, figsize=(10, 5))
-        debug_before = np.zeros_like(img)
-        debug_after = np.zeros_like(img)
-        debug_before_mask = np.zeros_like(img)
-        debug_after_mask = np.zeros_like(img)
-        cv2.fillPoly(debug_before_mask, [src_points.astype(np.int32)], (255, 255, 255))
-        cv2.fillPoly(debug_after_mask, [dst_points.astype(np.int32)], (255, 255, 255))
-        debug_before_mask = debug_before_mask.astype(bool)
-        debug_after_mask = debug_after_mask.astype(bool)
-        debug_before[debug_before_mask] = img[debug_before_mask]
-        debug_after[debug_after_mask] = transformed[debug_after_mask]
-        ax[0].set_title("Before")
-        ax[0].imshow(debug_before)
-        ax[1].set_title("After")
-        ax[1].imshow(debug_after)
-        plt.show()
-    img[mask] = transformed[mask]
+        draw_triangulation(img, average_landmarks, triangulation)
+    return morph_seq(
+        frames,
+        img,
+        src_landmarks,
+        dst_landmarks,
+        triangulation.tolist(),
+        p,
+    )
